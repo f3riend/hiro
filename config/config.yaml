@@ -1,0 +1,31 @@
+app:
+  name: Hiro
+  description: Personal voice assitant
+  env: dev
+  version: 1
+
+
+ai:
+  provider: openai
+  model: gpt-4o
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  reload: false
+
+
+logger:
+  level: INFO
+  format: "{time} | {level} | {name} | {file}:{line} | {message}"
+  rotation: 5 MB
+
+
+cors:
+  allow_origins:
+    - "*"
+  allow_methods:
+    - "*"
+  allow_headers:
+    - "*"
+  allow_credentials: false
