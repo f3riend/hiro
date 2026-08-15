@@ -6,8 +6,9 @@ app:
 
 
 ai:
-  provider: openai
-  model: gpt-4o
+  provider: anthropic
+  model: claude-opus-4-8
+  auth: oauth
 
 server:
   host: 0.0.0.0

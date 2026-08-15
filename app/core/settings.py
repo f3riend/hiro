@@ -5,21 +5,17 @@ from dotenv import load_dotenv
 import os
 
 
-
-
 class AppSettings(BaseModel):
     name: str
     description: str
     env: str
     version: float
 
+
 class ServerSettings(BaseModel):
     host: str
     port: int
     reload: bool
-
-
-
 
 
 class LoggerSettings(BaseModel):
@@ -35,10 +31,10 @@ class CorsSettings(BaseModel):
     allow_credentials: bool
 
 
-
 class Ai(BaseModel):
     provider: str
     model: str
+    auth: str = "apikey"   # apikey | oauth  (config.yaml'da yoksa apikey varsayılır)
 
 
 class Settings(BaseModel):
@@ -49,15 +45,13 @@ class Settings(BaseModel):
     ai: Ai
 
 
-def get_settings()->Settings:
+def get_settings() -> Settings:
     raw = load_config()
     load_dotenv()
-    if 'REDIS_URL' in os.environ:
+    if 'REDIS_URL' in os.environ and 'celery' in raw:
         raw['celery']['broker'] = os.environ['REDIS_URL']
         raw['celery']['backend'] = os.environ['REDIS_URL']
     return Settings(**raw)
-
-
 
 
 settings = get_settings()

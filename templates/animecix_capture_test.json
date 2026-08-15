@@ -1,0 +1,21 @@
+{
+  "name": "animecix_capture_test",
+  "description": "Belirli bir bölüm URL'ine git, 'Şimdi İzle'ye bas, video oynayınca URL'ini yakala ve indir. Test için tek bölüm.",
+  "site": "animecix.tv",
+  "params": ["episode_url", "title"],
+  "steps": [
+    { "do": "navigate", "url": "{episode_url}" },
+
+    { "do": "wait", "selector": "button.app-btn--primary", "timeout_ms": 20000 },
+    { "do": "delay", "seconds": 2 },
+
+    {
+      "do": "capture_video",
+      "trigger": "button.app-btn--primary",
+      "wait_ms": 15000,
+      "pick": "m3u8",
+      "download": true,
+      "title": "{title}"
+    }
+  ]
+}
