@@ -18,6 +18,6 @@ class ChatRequest(BaseModel):
 
 @hiro.post("/chat")
 async def chat_endpoint(req: ChatRequest):
-    reply = chat(agent, req.message)
+    reply = chat(agent, req.message, user_id="http")
     hiro_log.info(f"chat: {req.message[:60]}")
     return JSONResponse({"reply": reply})

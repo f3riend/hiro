@@ -7,10 +7,13 @@ import asyncio
 import json
 
 from app.services.browser_engine import run_template as engine_run
-from app.services.memory_engine import get_memory, save_memory, list_topics
+from app.services.memory_engine import get_memory as _get_mem, save_memory as _save_mem, list_topics
+from app.services.memory_engine.memory import add_episode, recent_episodes, set_working, compute_streaks
 from app.services.media_engine import (get_metadata, add_watched, list_watched,
     add_tracking, list_tracking, add_history, recent_history)
+from app.services.browser_engine.downloader import download as _ytdlp_download
 from app.core.settings import settings
+from app.services.hiro_core.conversation import search_history
 
 tools_log = logger.bind(module="hiro_tools")
 
@@ -37,9 +40,7 @@ def web_search(query: str) -> str:
     import os
     key = os.getenv("OPENAI_API_KEY")
     if not key:
-        return json.dumps({"error": "web_search için OPENAI_API_KEY gerekli"}, ensure_ascii=False)
-    # web arama ana modelden BAĞIMSIZ — provider anthropic olsa bile OpenAI'ın
-    # web-search destekli modelini kullan (settings.ai.model'i BURAYA gönderme)
+        return json.dumps({"error": "web_search needs OPENAI_API_KEY"}, ensure_ascii=False)
     client = OpenAI(api_key=key)
     try:
         resp = client.responses.create(
@@ -72,13 +73,23 @@ def _run_async(coro):
 
 
 @tool
+def list_templates() -> str:
+    """List every available browser-automation template with its description and
+    params. Call this when you need to pick a template and aren't sure which fits,
+    or to discover what automations exist. New templates are just JSON files — this
+    always reflects what's on disk, so trust it over memory."""
+    return json.dumps({"templates": available_templates()}, ensure_ascii=False)
+
+
+@tool
 def run_template(template_name: str, params: dict) -> str:
     """Run a browser automation template (Hiro engine) in the real browser.
-    Use to actually do things: search a site, check for new episodes, open pages,
-    scrape data. template_name MUST be one of the exact names listed in your system
-    prompt (don't invent names). params are what that template expects.
-    Returns structured JSON — look at ok, data, changes. If the name is wrong the
-    result lists the available templates; pick the correct one and call again."""
+    Use to actually do things: scan a site's grid, open pages, play a video, capture
+    and download it. Read each template's description (see list_templates) and fill
+    its params yourself from context — e.g. for the animecix template, pull the user's
+    tracking list first (get_library 'tracking') and pass those names as favori_animeler.
+    template_name must be an existing template. Returns structured JSON (ok, data,
+    changes, notifications). If the name is wrong the result lists available templates."""
     tpl_path = TEMPLATES_DIR / f"{template_name}.json"
     if not tpl_path.exists():
         return json.dumps({"ok": False, "error": f"template '{template_name}' not found",
@@ -93,10 +104,8 @@ def run_template(template_name: str, params: dict) -> str:
         return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
 
-
-
-# schedules-engine is a CLI like browser_engine; call it as a subprocess so the
-# AI produces the same dynamic params it would on the command line.
+# schedules-engine is a CLI; call it as a subprocess so the AI produces the same
+# dynamic params it would on the command line.
 SCHEDULER = "app/services/schedules_engine/scheduler.py"
 
 
@@ -105,15 +114,14 @@ def schedule_task(action: str, when: str = "", repeat: str = "once", at: str = "
                   template: str = "", params: dict = None, message: str = "",
                   habit: str = "", notify: str = "") -> str:
     """Schedule a task to run later (Hiro schedules-engine). Use for anything
-    time-based: download tonight at midnight, remind every 3 days, weekly checks.
-    action: 'browser_engine' (run a template) or 'notify' (send a reminder).
-    when: ALWAYS use relative format — '+2min' '+3h' '+1d' 'tonight' 'tomorrow 09:00'.
-          NEVER compute or guess an ISO date yourself — the scheduler converts these.
+    time-based: download tonight, remind every 3 days, weekly checks, daily briefing.
+    action: 'browser_engine' (run a template) | 'notify' (send a reminder) | 'heartbeat'
+            (daily briefing).
+    when: ALWAYS relative — '+2min' '+3h' '+1d' 'tonight' 'tomorrow 09:00'. NEVER compute
+          an ISO date yourself — the scheduler converts these.
     repeat: 'once'|'every:3d'|'every:1w'|'weekdays:1,3,5,6' (1=Mon..7=Sun).
-    at: 'HH:MM' for repeating jobs (e.g. '09:00').
-    For browser_engine give template + params; for notify give message (+ optional
-    habit key for tracking). notify: message to push when the job finishes.
-    Returns JSON with the job id and next_run."""
+    at: 'HH:MM' for repeating jobs. For browser_engine give template + params; for
+    notify give message (+ optional habit key). Returns JSON with job id and next_run."""
     cmd = ["python", SCHEDULER, "add", "--action", action]
     if when:
         cmd += ["--when", when]
@@ -141,8 +149,8 @@ def schedule_task(action: str, when: str = "", repeat: str = "once", at: str = "
 
 @tool
 def list_scheduled() -> str:
-    """List all scheduled tasks (pending, repeating, etc). Use when the user asks
-    what's scheduled, what's coming up, or before editing/cancelling a task."""
+    """List all scheduled tasks (pending, repeating). Use when the user asks what's
+    scheduled or coming up, or before editing/cancelling a task."""
     try:
         out = subprocess.run(["python", SCHEDULER, "list"], capture_output=True, text=True, timeout=30)
         return out.stdout.strip()
@@ -152,9 +160,8 @@ def list_scheduled() -> str:
 
 @tool
 def missed_tasks() -> str:
-    """Show tasks whose time passed while the machine was off (missed jobs).
-    Use at startup or when the user asks what they missed, so they can reschedule
-    or cancel. The system never auto-decides — it surfaces missed jobs for the user."""
+    """Show tasks whose time passed while the machine was off. Use at startup or when
+    the user asks what they missed, so they can reschedule or cancel."""
     try:
         out = subprocess.run(["python", SCHEDULER, "missed"], capture_output=True, text=True, timeout=30)
         return out.stdout.strip()
@@ -162,15 +169,13 @@ def missed_tasks() -> str:
         return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
 
-
-
 NOTIFIER = "app/services/notification_engine/notifier.py"
 
 
 @tool
 def send_notification(message: str) -> str:
-    """Send a notification to Oktay right now (desktop + log). Use for immediate
-    alerts. For time-based reminders use schedule_task with action='notify' instead."""
+    """Send a notification to Oktay right now (desktop + log). For time-based reminders
+    use schedule_task with action='notify' instead."""
     try:
         out = subprocess.run(["python", NOTIFIER, "send", "--message", message],
                              capture_output=True, text=True, timeout=15)
@@ -180,82 +185,152 @@ def send_notification(message: str) -> str:
         return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
 
 
+@tool
+def get_memory(topic: str = "") -> str:
+    """Fetch stored facts about Oktay (lazy-fetch). Empty topic lists available topics;
+    a topic returns its content. Topics: profile, goals, routines, favorites, etc.
+    Call when something personal about Oktay (his prefs, goals, habits) is needed.
+    Don't assume — fetch when needed."""
+    if not topic:
+        return json.dumps({"topics": list_topics()}, ensure_ascii=False)
+    data = _get_mem(topic)
+    if not data:
+        return json.dumps({"topic": topic, "note": "no record yet"}, ensure_ascii=False)
+    tools_log.info(f"get_memory: {topic}")
+    return json.dumps({"topic": topic, "content": data}, ensure_ascii=False)
 
 
 @tool
-def hafiza_getir(konu: str = "") -> str:
-    """Oktay hakkında kayıtlı bilgiyi çek (lazy-fetch). konu boşsa mevcut konuları
-    listeler; bir konu verilirse o konunun içeriğini döner.
-    Konular: profil (kim, tercihler), hedefler, rutinler, favori_anime, vb.
-    Kişiselleştirme gereken, Oktay'ın kendisiyle/tercihleriyle/hedefleriyle ilgili
-    bir şey sorulduğunda çağır. Her şeyi peşin bilme — ihtiyaç olunca bunu çağır."""
-    if not konu:
-        topics = list_topics()
-        return json.dumps({"mevcut_konular": topics}, ensure_ascii=False)
-    veri = get_memory(konu)
-    if not veri:
-        return json.dumps({"konu": konu, "not": "bu konuda henüz kayıt yok"}, ensure_ascii=False)
-    tools_log.info(f"hafiza_getir: {konu}")
-    return json.dumps({"konu": konu, "icerik": veri}, ensure_ascii=False)
+def save_memory_tool(topic: str, data: dict) -> str:
+    """Save/update a durable fact about Oktay. topic: 'profile'|'goals'|'routines'|
+    'favorites' etc. data: fields to store (dict). MERGES with existing content (doesn't
+    overwrite). Call when Oktay states something lasting: a goal, preference, routine,
+    favorite. Don't store transient things."""
+    saved = _save_mem(topic, data, birlestir=True)
+    tools_log.info(f"save_memory: {topic} <- {list(data.keys())}")
+    return json.dumps({"ok": True, "topic": topic, "current": saved}, ensure_ascii=False)
 
 
 @tool
-def hafiza_kaydet(konu: str, veri: dict) -> str:
-    """Oktay hakkında yeni bir bilgiyi hafızaya kaydet/güncelle. konu: 'profil'|
-    'hedefler'|'rutinler'|'favori_anime' gibi. veri: kaydedilecek alanlar (dict).
-    Mevcut içerikle BİRLEŞTİRİR (üzerine yazmaz), yani eski bilgi korunur.
-    Oktay kendisi hakkında kalıcı bir şey söylediğinde çağır: hedef, tercih, rutin,
-    favori. Geçici/anlık şeyleri kaydetme — sadece kalıcı bilgiyi."""
-    saved = save_memory(konu, veri, birlestir=True)
-    tools_log.info(f"hafiza_kaydet: {konu} <- {list(veri.keys())}")
-    return json.dumps({"ok": True, "konu": konu, "guncel": saved}, ensure_ascii=False)
-
-
-
-
-@tool
-def kutuphaneye_ekle(isimler: list, media_type: str = "tv") -> str:
-    """Bir film/dizi/animeyi TMDB'den zenginleştirip izlenenler kütüphanesine ekle.
-    isimler: eşleştirme için ad listesi — animecix hem Japonca hem İngilizce ad
-    tutar, İKİSİNİ DE ver (ör. ["Tensei shitara Slime", "That Time I Got
-    Reincarnated as a Slime"]) ki doğru eşleşsin. media_type: tv (dizi/anime) | movie.
-    TMDB'den kapak, oyuncu, özet, tür çeker, kütüphaneye kaydeder."""
-    meta = get_metadata(isimler, media_type)
+def add_to_library(names: list, media_type: str = "tv") -> str:
+    """Enrich a movie/show/anime from TMDB and add it to the watched library.
+    names: list of names for matching — animecix keeps both Japanese and English titles,
+    give BOTH (e.g. ["Tensei shitara Slime", "That Time I Got Reincarnated as a Slime"]).
+    media_type: tv (show/anime) | movie. Pulls poster, cast, overview, genres."""
+    meta = get_metadata(names, media_type)
     if not meta:
-        return json.dumps({"ok": False, "not": "TMDB'de eşleşme bulunamadı"}, ensure_ascii=False)
+        return json.dumps({"ok": False, "note": "no TMDB match"}, ensure_ascii=False)
     add_watched(meta)
     add_history(meta["title"], meta.get("id"))
-    tools_log.info(f"kutuphaneye_ekle: {meta['title']}")
-    return json.dumps({"ok": True, "eklendi": meta["title"], "yil": meta.get("year"),
-                       "tur": meta.get("genres"), "kapak": meta.get("poster_url")},
+    tools_log.info(f"add_to_library: {meta['title']}")
+    return json.dumps({"ok": True, "added": meta["title"], "year": meta.get("year"),
+                       "genres": meta.get("genres"), "poster": meta.get("poster_url")},
                       ensure_ascii=False)
 
 
 @tool
-def takibe_al(anime_adi: str, animecix_url: str = "", son_bolum: int = 0) -> str:
-    """Bir animeyi takip listesine ekle — yeni bölüm çıkınca haber verilir (otomatik
-    indirilmez, Oktay karar verir). anime_adi: takip adı. animecix_url: bölüm sayfası
-    URL'i (kontrol için). son_bolum: şu anki en son bölüm no."""
-    res = add_tracking(anime_adi, animecix_url, son_bolum)
-    tools_log.info(f"takibe_al: {anime_adi} (bölüm {son_bolum})")
-    return json.dumps({"ok": True, "takip": anime_adi, "son_bolum": son_bolum,
-                       "not": "yeni bölüm çıkınca haber vereceğim"}, ensure_ascii=False)
+def track_anime(name: str, animecix_url: str = "", last_episode: int = 0, alt_names: str = "") -> str:
+    """Add an anime to the tracking list — you'll be told when a new episode is out
+    (not auto-downloaded; Oktay decides). name: tracking name Oktay uses (e.g. "Tensura").
+    animecix_url: episode page URL. last_episode: current latest episode number.
+    alt_names: OTHER names shown in the animecix grid / TMDB, comma-separated (e.g.
+    "Tensei shitara Slime Datta Ken, That Time I Got Reincarnated as a Slime"). This is
+    IMPORTANT for grid matching — the grid shows the full name, Oktay uses a short one."""
+    add_tracking(name, animecix_url, last_episode, alt_adlar=alt_names)
+    tools_log.info(f"track_anime: {name} (ep {last_episode})")
+    return json.dumps({"ok": True, "tracking": name, "last_episode": last_episode,
+                       "note": "will alert on new episode"}, ensure_ascii=False)
 
 
 @tool
-def kutuphane_getir(ne: str = "izlenenler") -> str:
-    """Medya kütüphanesini sorgula. ne: 'izlenenler' (arşiv) | 'takip' (takip listesi)
-    | 'gecmis' (son izlenenler). Öneri yaparken ya da 'ne izledim' sorulunca kullan.
-    İzlenenlerin tür/oyuncu bilgisiyle benzer öneriler yapabilirsin."""
-    if ne == "takip":
-        data = list_tracking()
-    elif ne == "gecmis":
+def get_library(what: str = "watched") -> str:
+    """Query the media library. what: 'watched' (archive) | 'tracking' (tracking list)
+    | 'history' (recently watched). Use for recommendations, 'what did I watch', or to
+    get the tracking list before running the animecix template (pass those names as
+    favori_animeler). For tracking, each entry has name + alt_names — pass both for
+    grid matching."""
+    if what == "tracking":
+        rows = list_tracking()
+        data = [{"name": r["anime_adi"], "alt_names": r.get("alt_adlar", ""),
+                 "last_episode": r.get("son_bolum"), "url": r.get("animecix_url")}
+                for r in rows]
+    elif what == "history":
         data = recent_history()
     else:
         data = [{"title": w["title"], "type": w.get("type"), "year": w.get("year"),
                  "genres": w.get("genres"), "rating": w.get("rating")}
                 for w in list_watched()]
-    return json.dumps({"ok": True, "ne": ne, "kayitlar": data}, ensure_ascii=False)
+    return json.dumps({"ok": True, "what": what, "records": data}, ensure_ascii=False)
 
 
-TOOLS = [web_search, run_template, schedule_task, list_scheduled, missed_tasks, send_notification, hafiza_getir, hafiza_kaydet, kutuphaneye_ekle, takibe_al, kutuphane_getir]
+@tool
+def download_video(url: str, title: str = "") -> str:
+    """Download a video via yt-dlp (YouTube and any yt-dlp-supported site). url: video
+    link. title: filename (empty = video's own title). Resumes with --continue. Use when
+    a direct video URL is given and Oktay says download. For animecix, use run_template
+    instead (it captures the stream)."""
+    res = _ytdlp_download(url, title=title or None)
+    if res.get("done"):
+        tools_log.info(f"download_video: done {url[:50]}")
+        return json.dumps({"ok": True, "downloaded": url, "note": "saved to downloads/"}, ensure_ascii=False)
+    return json.dumps({"ok": False, "url": url, "returncode": res.get("returncode"),
+                       "note": "incomplete or failed"}, ensure_ascii=False)
+
+
+@tool
+def log_event(event: str, detail: dict = None) -> str:
+    """Log an event to episodic memory — what Oktay did and when. For habit/progress
+    tracking: "worked out", "showered", "finished X", "watched Tensura ep17". Feeds
+    streaks and the daily briefing. Log when Oktay says he DID something (a past event,
+    not a future plan)."""
+    add_episode(event, detail)
+    tools_log.info(f"log_event: {event}")
+    return json.dumps({"ok": True, "logged": event}, ensure_ascii=False)
+
+
+@tool
+def get_progress(event: str = "") -> str:
+    """Get habit/progress status — streaks and recent events. Empty event returns all
+    streaks (days in a row) + recent events; a name returns that event's records. Use for
+    "what's my streak", "how many days working out", "what did I do lately". Returns empty
+    honestly if no records."""
+    streaks = compute_streaks()
+    recent = [{"event": e["olay"], "when": (e.get("ne_zaman") or "")[:10]}
+              for e in recent_episodes(gun=7, limit=30)]
+    if event:
+        recent = [e for e in recent if event.lower() in e["event"].lower()]
+        streak = streaks.get(event, 0)
+        if not streak:
+            for k, v in streaks.items():
+                if event.lower() in k.lower():
+                    streak = v
+                    break
+        return json.dumps({"ok": True, "event": event, "streak_days": streak,
+                           "recent": recent}, ensure_ascii=False)
+    tools_log.info("get_progress: all streaks")
+    return json.dumps({"ok": True, "streaks": streaks, "recent": recent}, ensure_ascii=False)
+
+
+
+
+
+@tool
+def search_conversation(query: str) -> str:
+    """Search older/archived conversation for something not in recent messages or the
+    running summary. Use ONLY when the user refers to something from far back that you
+    can't see in the current context — "what did we discuss weeks ago about X", "you
+    mentioned Y before". Searches archived messages + summary by keyword. Don't use for
+    recent things (those are already in context). Returns matches or says the topic may
+    never have come up."""
+    from app.services.hiro_core.conversation import search_history as _sh, get_active_user
+    res = _sh(get_active_user(), query)  # aktif kullanıcının arşivini ara
+    tools_log.info(f"search_conversation: {query[:40]}")
+    return json.dumps(res, ensure_ascii=False)
+
+
+TOOLS = [
+    web_search, list_templates, run_template, schedule_task, list_scheduled,
+    missed_tasks, send_notification, get_memory, save_memory_tool,
+    add_to_library, track_anime, get_library, download_video,
+    log_event, get_progress, search_conversation,
+]

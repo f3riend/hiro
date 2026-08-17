@@ -1,4 +1,3 @@
-from langchain_openai import ChatOpenAI
 import os
 from datetime import datetime
 from loguru import logger
@@ -7,13 +6,6 @@ from app.services.hiro_core.tools import TOOLS, available_templates
 from app.core.settings import settings
 
 agent_log = logger.bind(module="hiro_core")
-
-# agent constructor moved across versions; use whichever exists
-try:
-    from langchain.agents import create_agent as _make_agent
-except Exception:
-    from langgraph.prebuilt import create_react_agent as _make_agent
-
 
 PERSONALITY = """Sen Hiro'sun — Oktay'ın ikinci beyni. Bir asistan değil, onun dış hafızası
 ve düzen kurucusu. Onun kendi geliştirdiği araçları kullanarak hayatını operatize edersin.
@@ -54,28 +46,54 @@ NASIL ÇALIŞIRSIN — TOOL'LARI ZİNCİRLE:
   diğerine besle. Tek tool'la yetinme, gerekiyorsa arka arkaya çağır.
 - Bir işe başlamadan mevcut durumu değerlendir, körlemesine başlama.
 
-MEDYA KÜTÜPHANESİ — kutuphaneye_ekle, takibe_al, kutuphane_getir:
-- "bunu izlediklerime ekle" / "kütüphaneme ekle" → kutuphaneye_ekle. İSİM EŞLEŞTİRME:
+MEDYA KÜTÜPHANESİ — add_to_library, track_anime, get_library:
+- "bunu izlediklerime ekle" / "kütüphaneme ekle" → add_to_library. İSİM EŞLEŞTİRME:
   animecix hem Japonca hem İngilizce ad tutar, İKİSİNİ de ver ["Tensei shitara Slime",
   "That Time I Got Reincarnated as a Slime"] ki TMDB doğru eşleştirsin. TMDB'den kapak,
   oyuncu, özet çekilir. Ad bilmiyorsan önce web_search ile iki adı da öğren.
-- "bunu takibe al" / "yeni bölüm çıkınca haber ver" → takibe_al. Otomatik indirmez,
+- "bunu takibe al" / "yeni bölüm çıkınca haber ver" → track_anime. Otomatik indirmez,
   yeni bölüm çıkınca haber verir, Oktay karar verir. animecix_url ve son bölüm no ver.
-- "ne izledim" / "bana öneri" / öneri gerektiğinde → kutuphane_getir. İzlenenlerin
+- "ne izledim" / "bana öneri" / öneri gerektiğinde → get_library. İzlenenlerin
   tür/oyuncu bilgisiyle benzer öneriler yap ("Tensura'yı sevdin, bu da isekai...").
 - İki liste ayrı: izlediklerine ekle = arşiv (metadata'lı). takibe al = yeni bölüm
   bildirimi. Biri geçmiş, biri gelecek — karıştırma.
+- "yeni bölüm var mı", "takip ettiklerimi kontrol et" → run_template ile animecix şablonu. Takip
+  listesini tarar, yeni bölümü olanları söyler (indirmez). Çıkanları indirmek istersen
+  ayrıca sorarsın.
+- YouTube linki verilip "indir" denince → download_video. yt-dlp YouTube'u native indirir.
+  Bunun için browser şablonu/capture gerekmez, doğrudan URL yeter.
 
-HAFIZA — hafiza_getir, hafiza_kaydet (Claude × Obsidian lazy-fetch):
+BROWSER OTOMASYONU (generic — şablonları sen seçersin):
+- Bir şey yaptırman gerekince önce list_templates ile şablonlara bak, açıklamalarını
+  oku, uygun olanı seç, parametreleri BAĞLAMDAN sen doldur. Yeni şablon = sadece JSON,
+  ekstra kod yok.
+- animecix şablonu DİNAMİK — tek şablon, mod parametresiyle 3 iş yapar:
+  * "favori animelerimin yeni bölümü çıkmış mı, indir" → mod=yeni. Önce
+    get_library("tracking") ile takip listesini çek, isim+alt_names'i favori_animeler'e
+    virgülle ver. Grid taranır, yeni bölüm iner. Oktay link/sezon VERMEZ.
+  * "X animesinin Y. sezonunu komple indir" → mod=sezon, home_url + season ver.
+    Sezon sayfasındaki TÜM bölümler otomatik toplanıp iner (kaç bölüm olduğunu tahmin
+    etme — şablon siteden okur). home_url'i takip listesinden ya da Oktay'dan al.
+  * "şu bölümü indir" (belirli sezon+bölüm) → mod=tek, home_url + season + episode ver.
+  home_url formatı: https://animecix.tv/titles/{id}/{slug} (takip listesindeki
+  animecix_url'den ya da web_search ile bulunur). Oktay ne isterse moda çevir.
+
+KONUŞMA GEÇMİŞİ (lazy fetch) — search_conversation:
+- Oktay çok eski bir şeye atıfta bulunursa ("haftalar önce X hakkında ne konuşmuştuk",
+  "daha önce Y demiştin") ve bu son mesajlarda/özette YOKSA → search_conversation ile
+  arşivi ara. Yakın şeyler için kullanma (onlar zaten context'te). Bulamazsa o konu hiç
+  konuşulmamış olabilir, dürüstçe söyle.
+
+HAFIZA — get_memory, save_memory_tool (Claude × Obsidian lazy-fetch):
 - Oktay hakkında hiçbir şeyi peşin bilmezsin. Kişiselleştirme ya da onun tercihi/
-  hedefi/rutini gereken bir şey olduğunda hafiza_getir ile ÇEK. Konu boşsa önce
+  hedefi/rutini gereken bir şey olduğunda get_memory ile ÇEK. Konu boşsa önce
   mevcut konuları listeler, sonra doğru konuyu çekersin. Tahmin etme, hafızadan al.
-- Oktay kendisi hakkında KALICI bir şey söylediğinde hafiza_kaydet ile kaydet:
+- Oktay kendisi hakkında KALICI bir şey söylediğinde save_memory_tool ile kaydet:
   yeni hedef ("1000 kelime öğreneceğim"), tercih ("geceleri çalışırım"), rutin,
   favori anime/film. Geçici/anlık şeyleri kaydetme — sadece ay sonra da geçerli olanı.
-- Örnek: "ne izlesem" → hafiza_getir("favori_anime") veya ("tercihler") çek, ona göre öner.
-  "İngilizce hedefim ne durumda" → hafiza_getir("hedefler") çek, söyle.
-  "Artık sabahları çalışacağım" → hafiza_kaydet("tercihler", {"calisma": "sabah"}).
+- Örnek: "ne izlesem" → get_memory("favori_anime") veya ("tercihler") çek, ona göre öner.
+  "İngilizce hedefim ne durumda" → get_memory("hedefler") çek, söyle.
+  "Artık sabahları çalışacağım" → save_memory_tool("tercihler", {"calisma": "sabah"}).
 - Güncel/emin olmadığın bilgi için web_search; gerçek iş (sitede ara, bölüm kontrol,
   indir) için run_template. run_template dönüşündeki ok/data/changes'e bak, ham JSON'u
   gösterme, anlamını söyle.
@@ -143,6 +161,7 @@ def build_llm():
     key = os.getenv("OPENAI_API_KEY")
     if not key:
         raise SystemExit("OPENAI_API_KEY yok (.env'e ekle)")
+    from langchain_openai import ChatOpenAI  # sadece openai kullanılınca yükle
     return ChatOpenAI(model=settings.ai.model, temperature=0.3, api_key=key)
 
 
@@ -176,6 +195,10 @@ def build_agent():
     if settings.ai.provider.lower() == "anthropic" and auth == "oauth":
         return None
     llm = build_llm()
+    try:
+        from langchain.agents import create_agent as _make_agent
+    except Exception:
+        from langgraph.prebuilt import create_react_agent as _make_agent
     prompt = build_prompt()
     # system-prompt param name differs across versions; try known names
     for kw in ("prompt", "system_prompt", "state_modifier", "messages_modifier"):
@@ -189,18 +212,82 @@ def build_agent():
 # single turn: personality is injected as a system message each call.
 # no history is threaded back yet (that needs proper ToolMessage handling);
 # each message is independent for now.
-def chat(agent, message: str) -> str:
-    # oauth yolu: claude-agent-sdk (agent None gelir)
+def _summarize_old(user_id: str):
+    """Eski mesajları Hiro'ya özetletip sakla, ham eski mesajları sil.
+    Böylece token patlamaz ama eski bağlam özet olarak korunur."""
+    from app.services.hiro_core.conversation import (
+        old_messages_for_summary, get_summary, save_summary_and_trim)
+
+    eski = old_messages_for_summary(user_id)
+    if not eski:
+        return
+
+    # önceki özet + yeni eski mesajlar → güncel özet
+    onceki_ozet = get_summary(user_id)
+    konusma = "\n".join(f"{'Oktay' if m['role']=='user' else 'Hiro'}: {m['content']}"
+                         for m in eski)
+    ozet_prompt = (
+        "Aşağıdaki konuşmayı KISA bir özete indir. Sadece gelecekte önemli olacak "
+        "şeyleri tut: kararlar, tercihler, üzerinde çalışılan işler, kişisel gerçekler, "
+        "yarım kalan konular. Sohbet detayını atла. Madde madde, öz.\n\n"
+    )
+    if onceki_ozet:
+        ozet_prompt += f"[ÖNCEKİ ÖZET]\n{onceki_ozet}\n\n[YENİ KONUŞMA]\n{konusma}\n\nGüncel birleşik özet:"
+    else:
+        ozet_prompt += f"[KONUŞMA]\n{konusma}\n\nÖzet:"
+
+    # özeti üret (özet için geçmiş taşımaya gerek yok — tek seferlik)
     auth = getattr(settings.ai, "auth", "apikey").lower()
     if settings.ai.provider.lower() == "anthropic" and auth == "oauth":
         from app.services.hiro_core.oauth_engine import oauth_chat
-        return oauth_chat(message, settings.ai.model)
+        ozet = oauth_chat(ozet_prompt, settings.ai.model)
+    else:
+        agent = build_agent()
+        sys_msg = {"role": "system", "content": "Sen bir konuşma özetleyicisin. Kısa, öz, madde madde özetle."}
+        result = agent.invoke({"messages": [sys_msg, {"role": "user", "content": ozet_prompt}]},
+                              {"recursion_limit": 3})
+        ozet = result["messages"][-1].content
 
-    # apikey yolu: LangChain
-    messages = [
-        {"role": "system", "content": build_prompt()},
-        {"role": "user", "content": message},
-    ]
+    save_summary_and_trim(user_id, ozet)
+    agent_log.info(f"konuşma özetlendi: {user_id} ({len(eski)} mesaj → özet)")
+
+
+def chat(agent, message: str, user_id: str = "default") -> str:
+    """user_id: konuşma geçmişini kime göre taşıyacağımız (telegram chat_id / 'default').
+    Geçmiş, modele 'az önce ne konuştuk'u gösterir — 'indir → neyi?' sorununu çözer."""
+    from app.services.hiro_core.conversation import (
+        recent_messages, add_message, get_summary, needs_summary, set_active_user)
+
+    set_active_user(user_id)  # lazy-fetch tool'u bu kullanıcının arşivini arasın
+    # kullanıcının mesajını geçmişe yaz (cevaptan önce — sıra korunur)
+    add_message(user_id, "user", message)
+
+    # konuşma çok uzadıysa eski kısmı özetle (Katman 2) — arka planda, cevabı bloklamadan
+    if needs_summary(user_id):
+        try:
+            _summarize_old(user_id)
+        except Exception as e:
+            agent_log.warning(f"özetleme hata: {e}")
+
+    # son N mesajı çek (bu mesaj dahil)
+    history = recent_messages(user_id)
+    # eski konuşma özeti varsa, sistem prompt'una eklenecek
+    summary = get_summary(user_id)
+
+    # oauth yolu: claude-agent-sdk
+    auth = getattr(settings.ai, "auth", "apikey").lower()
+    if settings.ai.provider.lower() == "anthropic" and auth == "oauth":
+        from app.services.hiro_core.oauth_engine import oauth_chat
+        reply = oauth_chat(message, settings.ai.model, history=history, summary=summary)
+        add_message(user_id, "assistant", reply)
+        return reply
+
+    # apikey yolu: LangChain — geçmişi messages'a kat
+    sys_content = build_prompt()
+    if summary:
+        sys_content += f"\n\n[ÖNCEKİ KONUŞMALARIN ÖZETİ — bağlam için]\n{summary}"
+    messages = [{"role": "system", "content": sys_content}]
+    messages.extend(history)  # geçmiş (kullanıcının yeni mesajı da dahil, en sonda)
     # recursion_limit: tool çağrı döngüsünü sınırla (Opus aynı kontrolü tekrarlamasın)
     result = agent.invoke({"messages": messages}, {"recursion_limit": 12})
 
@@ -214,4 +301,6 @@ def chat(agent, message: str) -> str:
     if total_in or total_out:
         agent_log.info(f"tokens: in={total_in} out={total_out} total={total_in + total_out}")
 
-    return result["messages"][-1].content
+    reply = result["messages"][-1].content
+    add_message(user_id, "assistant", reply)  # cevabı da geçmişe yaz
+    return reply

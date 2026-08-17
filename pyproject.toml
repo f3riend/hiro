@@ -28,4 +28,6 @@ dependencies = [
     "soundfile>=0.14.0",
     "uvicorn>=0.52.1",
     "webrtcvad>=2.0.10",
+    "websocket-client>=1.9.0",
+    "yt-dlp>=2026.7.4",
 ]

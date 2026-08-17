@@ -1,0 +1,96 @@
+{
+  "name": "animecix",
+  "description": "Animecix indirme — TEK dinamik şablon, AI moda göre karar verir. mod: 'yeni' = ana sayfa 'Son Eklenen Bölümler' gridini tara, favori_animeler'in yeni bölümünü indir. 'sezon' = home_url + season ver, o sezonun sezon sayfasındaki TÜM bölüm kartlarından URL toplanıp hepsi indirilir (bölüm sayısı tahmin edilmez, siteden okunur). 'tek' = home_url + season + episode ver, tek bölüm indirilir. AI karar verir: 'favori yeni bölüm' → yeni; 'X.sezonu komple' → sezon; 'şu bölüm' → tek. URL'ler relatif gelir (/titles/...), foreach tam URL kurar.",
+  "site": "animecix.tv",
+  "params": ["mod", "favori_animeler", "home_url", "season", "episode", "title"],
+  "steps": [
+    {
+      "do": "condition",
+      "check": "{mod} == yeni",
+      "then": [
+        { "do": "navigate", "url": "https://animecix.tv/" },
+        { "do": "wait", "selector": "episode-portrait-item", "timeout_ms": 20000 },
+        { "do": "delay", "seconds": 2 },
+        {
+          "do": "loop_pages",
+          "next_btn": "button[aria-label='Sonraki sayfa']",
+          "max": 8,
+          "body": [
+            { "do": "delay", "seconds": 1 },
+            {
+              "do": "extract_list",
+              "selector": "episode-portrait-item",
+              "fields": { "baslik": "a.title", "url": "a.title @href", "bolum": ".subtitle" },
+              "as": "grid"
+            },
+            {
+              "do": "find_match",
+              "list": "{grid}",
+              "field": "baslik",
+              "contains": "{favori_animeler}",
+              "on_match": "collect",
+              "extract": { "baslik": "baslik", "url": "url", "bolum": "bolum" }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "do": "condition",
+      "check": "{mod} == sezon",
+      "then": [
+        { "do": "navigate", "url": "{home_url}/season/{season}" },
+        { "do": "wait", "selector": "episode-card", "timeout_ms": 20000 },
+        { "do": "delay", "seconds": 2 },
+        {
+          "do": "extract_list",
+          "selector": "episode-card",
+          "fields": { "baslik": "a.title", "url": "a.title @href", "bolum": ".number span" },
+          "as": "matched_results"
+        }
+      ]
+    },
+    {
+      "do": "condition",
+      "check": "{mod} == tek",
+      "then": [
+        { "do": "navigate", "url": "{home_url}/season/{season}/episode/{episode}" },
+        { "do": "wait", "selector": "button.app-btn--primary", "timeout_ms": 20000 },
+        { "do": "delay", "seconds": 2 },
+        {
+          "do": "capture_video",
+          "trigger": "button.app-btn--primary",
+          "wait_ms": 15000,
+          "pick": "m3u8",
+          "download": true,
+          "title": "{title}"
+        }
+      ]
+    },
+    {
+      "do": "condition",
+      "check": "{mod} != tek",
+      "then": [
+        {
+          "do": "foreach",
+          "list": "{matched_results}",
+          "as": "m",
+          "body": [
+            { "do": "new_tab", "url": "https://animecix.tv{m.url}" },
+            { "do": "wait", "selector": "button.app-btn--primary", "timeout_ms": 20000 },
+            { "do": "delay", "seconds": 2 },
+            {
+              "do": "capture_video",
+              "trigger": "button.app-btn--primary",
+              "wait_ms": 15000,
+              "pick": "m3u8",
+              "download": true,
+              "title": "{m.baslik}"
+            },
+            { "do": "close_page" }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -7,6 +7,7 @@ import uvicorn
 
 from app.services.claudeflare import connect_claudeflare
 from app.services.telegram_engine import run_telegram
+from app.services.media_engine.tab_watcher import run as run_tab_watcher
 from app.core.settings import settings
 from app.api.sound import sound
 from app.api.hiro import hiro
@@ -24,12 +25,18 @@ def connect_api():
 
 
 # arka plan engine'leri: scheduler (60sn tick) ve notifier (10sn drain)
+# subprocess DEĞİL — doğrudan fonksiyon (aynı süreç, daemon thread). Ana süreç
+# ölünce (Ctrl+C) thread'ler de ölür, zombi subprocess kalmaz. uv ortamı paylaşılır.
 def start_scheduler():
-    subprocess.run(["python", "app/services/schedules_engine/scheduler.py", "run"])
+    import argparse
+    from app.services.schedules_engine import scheduler as sch
+    sch.cmd_run(argparse.Namespace())
 
 
 def start_notifier():
-    subprocess.run(["python", "app/services/notification_engine/notifier.py", "run"])
+    import argparse
+    from app.services.notification_engine import notifier as ntf
+    ntf.cmd_run(argparse.Namespace())
 
 
 app = FastAPI(
@@ -70,6 +77,9 @@ if __name__ == "__main__":
 
     # Telegram giriş kanalı (senden Hiro'ya yazma)
     threading.Thread(target=run_telegram, daemon=True).start()
-    root_info.info("engines + telegram started")
+
+    # Sekme izleyici (otomatik izlendi tespiti — 10dk + popup onayı)
+    threading.Thread(target=run_tab_watcher, daemon=True).start()
+    root_info.info("engines + telegram + tab_watcher started")
 
     connect_claudeflare()

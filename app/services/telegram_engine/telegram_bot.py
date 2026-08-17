@@ -35,12 +35,46 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if not text:
         return
+    # /reset — konuşma geçmişini temizle (yeni bağlamla başla)
+    if text.lower() in ("/reset", "/temizle", "/yeni"):
+        from app.services.hiro_core.conversation import clear_history
+        clear_history(str(update.effective_chat.id))
+        await update.message.reply_text("Konuşma geçmişi temizlendi, temiz başlıyoruz.")
+        return
     tg_log.info(f"telegram in: {text[:60]}")
+    # "yazıyor..." göstergesi — uzun işlemlerde kullanıcı beklediğini bilsin
     try:
-        reply = chat(_agent, text)
+        await update.message.chat.send_action("typing")
+    except Exception:
+        pass
+
+    try:
+        reply = chat(_agent, text, user_id=str(update.effective_chat.id))
     except Exception as e:
-        reply = f"Hata: {e}"
-    await update.message.reply_text(reply)
+        tg_log.warning(f"chat hata: {e}")
+        reply = f"Bir hata oldu: {str(e)[:200]}"
+
+    # Telegram gönderimi — timeout'a dayanıklı: uzun mesajı böl + retry
+    await _safe_reply(update, reply)
+
+
+async def _safe_reply(update, text):
+    """Telegram'a güvenli gönderim: 4000 karakter sınırı için böl, timeout'ta retry."""
+    import asyncio
+    if not text:
+        text = "(boş cevap)"
+    # Telegram mesaj sınırı ~4096 — uzun cevabı parçala
+    chunks = [text[i:i+3800] for i in range(0, len(text), 3800)] or ["(boş)"]
+    for chunk in chunks:
+        for attempt in range(3):  # 3 deneme (timeout geçici olabilir)
+            try:
+                await update.message.reply_text(chunk)
+                break
+            except Exception as e:
+                tg_log.warning(f"telegram gönderim denemesi {attempt+1} başarısız: {str(e)[:100]}")
+                if attempt < 2:
+                    await asyncio.sleep(2)  # bekle, tekrar dene
+                # 3. denemede de olmazsa sessizce geç (log'da görünür)
 
 
 def run_telegram():
@@ -48,7 +82,13 @@ def run_telegram():
     if not TELEGRAM_BOT:
         tg_log.warning("TELEGRAM_BOT yok, telegram bot başlatılmadı")
         return
-    app = Application.builder().token(TELEGRAM_BOT).build()
+    app = (Application.builder()
+           .token(TELEGRAM_BOT)
+           .connect_timeout(30)      # bağlantı için 30sn (varsayılan düşüktü)
+           .read_timeout(30)
+           .write_timeout(30)
+           .pool_timeout(30)
+           .build())
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_message))
     tg_log.info("Telegram bot started (polling)")
     # kendi event loop'unu kurar; thread içinde çalışması için

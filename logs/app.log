@@ -1,0 +1,6 @@
+2026-08-17 17:40:53 | INFO | root | main.py:72 | API initiazlized
+2026-08-17 17:40:53 | INFO | tab_watcher | tab_watcher.py:154 | Sekme izleyici başladı (eşik 10dk, kontrol 30s)
+2026-08-17 17:40:53 | INFO | root | main.py:83 | engines + telegram + tab_watcher started
+2026-08-17 17:40:53 | INFO | claudeflare_info | claudeflare.py:31 | Cloudflare tunnel starting...
+2026-08-17 17:40:53 | INFO | telegram_bot | telegram_bot.py:93 | Telegram bot started (polling)
+2026-08-17 17:49:24 | INFO | telegram_bot | telegram_bot.py:44 | telegram in: Sen kimsin ve seninle en son ne hakkinda konusmustuk

@@ -52,7 +52,7 @@ async def transcribe(file: UploadFile = File(...), talk: bool = True):
 
         # yazıyı Hiro'ya ilet, cevabını da ekle
         if talk and text:
-            reply = chat(agent, text)
+            reply = chat(agent, text, user_id="sound")
             response["reply"] = reply
 
         return JSONResponse(response)

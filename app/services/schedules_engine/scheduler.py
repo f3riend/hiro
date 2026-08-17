@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path as _Path
+# subprocess olarak çalışınca (python scheduler.py run) proje kökünü bul, app'i görebil
+_root = _Path(__file__).resolve().parents[3]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 """
 scheduler.py — Hiro Schedules Engine
 ═══════════════════════════════════════════════════════════════════════════
@@ -173,7 +180,7 @@ def compute_next_run(repeat, at_time, when=None, after=None):
     """Bir sonraki çalışma zamanını hesapla. after: baz alınacak an (default now)."""
     now = after or datetime.now()
 
-    if repeat == "once" or repeat is None:
+    if repeat in ("once", "none", None, ""):
         return resolve_when(when) if when else now
 
     h, m = parse_at(at_time or "09:00")
@@ -358,6 +365,15 @@ def run_job(job):
             emit_event("habit_tick", {"habit": job["habit_key"], "at": datetime.now().isoformat()})
         result["message"] = job["message"]
 
+    elif action == "heartbeat":
+        # proaktif günlük brifing üret + gönder
+        try:
+            from app.services.hiro_core.heartbeat import run_heartbeat
+            run_heartbeat()
+            result["heartbeat"] = "gönderildi"
+        except Exception as e:
+            result["error"] = str(e)
+
     return result
 
 
@@ -372,8 +388,19 @@ def cmd_tick(args):
     ran = []
     for row in due:
         job = dict(row)
-        res = run_job(job)
-        ran.append(res)
+        try:
+            res = run_job(job)
+            ran.append(res)
+        except Exception as e:
+            # bir iş patlarsa tüm tick çökmesin — o işi missed yap, devam et
+            engine_log_msg = f"job {job.get('id')} hata: {e}"
+            try:
+                conn.execute("UPDATE schedules SET status='missed' WHERE id=?", (job["id"],))
+                conn.commit()
+            except Exception:
+                pass
+            ran.append({"id": job.get("id"), "error": str(e)[:100]})
+            continue
 
         if res.get("download_incomplete"):
             # indirme yarım kaldı → job'u SİLME/tamamlama. next_run'ı biraz ileri al,
@@ -421,7 +448,7 @@ def main():
     a.add_argument("--when")                    # tek seferlik: "2026-08-12 00:00"
     a.add_argument("--repeat")                  # every:3d | weekdays:1,3,5 | once
     a.add_argument("--at")                      # "18:00" (tekrarlayan için)
-    a.add_argument("--action", required=True, choices=["browser_engine", "notify"])
+    a.add_argument("--action", required=True, choices=["browser_engine", "notify", "heartbeat"])
     a.add_argument("--template")
     a.add_argument("--params", nargs="*")
     a.add_argument("--message")
